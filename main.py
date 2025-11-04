@@ -1,9 +1,12 @@
-import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Optional
+import re
 
-app = FastAPI()
+app = FastAPI(title="Tommy Backend API", version="1.0.0")
 
+# Allow all origins so the Chrome extension can call this API
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -12,60 +15,72 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/")
-def read_root():
-    return {"message": "Hello from FastAPI Backend!"}
 
-@app.get("/api/hello")
-def hello():
-    return {"message": "Hello from the backend API!"}
+class ConciseRequest(BaseModel):
+    question: Optional[str] = ""
+    title: Optional[str] = ""
+    text: Optional[str] = ""
+    selection: Optional[str] = ""
+    hostname: Optional[str] = ""
+
+
+class ConciseResponse(BaseModel):
+    answer: str
+
 
 @app.get("/test")
-def test_database():
-    """Test endpoint to check if database is available and accessible"""
-    response = {
-        "backend": "✅ Running",
-        "database": "❌ Not Available",
-        "database_url": None,
-        "database_name": None,
-        "connection_status": "Not Connected",
-        "collections": []
-    }
-    
-    try:
-        # Try to import database module
-        from database import db
-        
-        if db is not None:
-            response["database"] = "✅ Available"
-            response["database_url"] = "✅ Configured"
-            response["database_name"] = db.name if hasattr(db, 'name') else "✅ Connected"
-            response["connection_status"] = "Connected"
-            
-            # Try to list collections to verify connectivity
-            try:
-                collections = db.list_collection_names()
-                response["collections"] = collections[:10]  # Show first 10 collections
-                response["database"] = "✅ Connected & Working"
-            except Exception as e:
-                response["database"] = f"⚠️  Connected but Error: {str(e)[:50]}"
-        else:
-            response["database"] = "⚠️  Available but not initialized"
-            
-    except ImportError:
-        response["database"] = "❌ Database module not found (run enable-database first)"
-    except Exception as e:
-        response["database"] = f"❌ Error: {str(e)[:50]}"
-    
-    # Check environment variables
-    import os
-    response["database_url"] = "✅ Set" if os.getenv("DATABASE_URL") else "❌ Not Set"
-    response["database_name"] = "✅ Set" if os.getenv("DATABASE_NAME") else "❌ Not Set"
-    
-    return response
+def test():
+    return {"ok": True}
 
 
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+@app.post("/concise", response_model=ConciseResponse)
+def concise(req: ConciseRequest):
+    text = (req.selection or "").strip() or (req.title or "").strip() or (req.text or "")[:500]
+    q = (req.question or "").strip()
+
+    # If prompt asks for one word explicitly
+    if re.search(r"\b(one\s*word|single\s*word)\b", q, flags=re.I):
+        w = top_keyword(text)
+        return {"answer": w or "OK"}
+
+    # If short selection, produce one word
+    if len(text.split()) <= 3:
+        return {"answer": top_keyword(text) or text or "OK"}
+
+    # Otherwise produce one short sentence (max ~12 words)
+    sentence = summarize_to_one_sentence(text, q)
+    return {"answer": sentence}
+
+
+STOP = set(
+    "the a an and or of to in on for with is are was were be as by at from that this it its into over under than then but so if".split()
+)
+
+
+def top_keyword(text: str) -> str:
+    words = re.findall(r"[a-zA-Z][a-zA-Z\-']+", text.lower())
+    words = [w for w in words if w not in STOP]
+    freq = {}
+    for w in words:
+        freq[w] = freq.get(w, 0) + 1
+    top = max(freq.items(), key=lambda kv: kv[1])[0] if freq else ""
+    return top.capitalize() if top else ""
+
+
+def summarize_to_one_sentence(text: str, question: str) -> str:
+    sentences = re.findall(r"[^.!?]+[.!?]", text) or [text]
+    s = sentences[0].strip() if sentences else text.strip()
+    if question:
+        q_words = re.findall(r"[a-zA-Z][a-zA-Z\-']+", question.lower())[:5]
+        scored = [(sn.strip(), sum(1 for qw in q_words if qw in sn.lower())) for sn in sentences]
+        scored.sort(key=lambda x: x[1], reverse=True)
+        if scored and scored[0][1] > 0:
+            s = scored[0][0]
+    words = s.split()[:12]
+    short = " ".join(words)
+    if not re.search(r"[.!?]$", short):
+        short += "."
+    return short
+
+
+# Utility endpoint mirroring the algorithm can be extended later to call LLMs
